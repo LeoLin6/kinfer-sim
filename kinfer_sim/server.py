@@ -29,6 +29,7 @@ from kinfer_sim.provider import (
     JoystickInputState,
     ModelProvider,
     SimpleJoystickInputState,
+    TenJointInputState,
 )
 from kinfer_sim.simulator import MujocoSimulator
 
@@ -68,7 +69,7 @@ class ServerConfig(tap.TypedArgs):
 
     # Model settings
     use_keyboard: bool = tap.arg(default=False, help="Use keyboard to control the robot")
-    command_type: Literal["joystick", "simple_joystick", "control_vector", "expanded_control_vector"] = tap.arg(
+    command_type: Literal["joystick", "simple_joystick", "control_vector", "expanded_control_vector", "ten_joint"] = tap.arg(
         default="expanded_control_vector", help="Type of command to use"
     )
 
@@ -360,6 +361,9 @@ async def serve(config: ServerConfig) -> None:
         default = None
     elif config.command_type == "expanded_control_vector":
         key_state = ExpandedControlVectorInputState()
+        default = None
+    elif config.command_type == "ten_joint":
+        key_state = TenJointInputState()
         default = None
     else:
         raise ValueError(f"Invalid command type: {config.command_type}")

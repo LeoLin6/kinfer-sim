@@ -1,6 +1,10 @@
 """Defines a K-Infer model provider for the Mujoco simulator."""
 
+import json
 import logging
+import math
+import socket
+import threading
 from abc import ABC, abstractmethod
 from typing import Sequence, cast
 
@@ -220,6 +224,20 @@ class ExpandedControlVectorInputState(InputState):
             self.value[5] -= self.STEP_SIZE
 
 
+class TenJointInputState(InputState):
+    """State to hold 10 joint command values for UDP control."""
+
+    value: list[float]
+
+    def __init__(self) -> None:
+        self.value = [0.0] * 10  # 10 joint values for upper body control
+
+    async def update(self, key: str) -> None:
+        # This state is controlled by UDP data, not keyboard
+        # Keyboard updates are ignored
+        pass
+
+
 class GenericOHEInputState(InputState):
     """State to hold and modify control vector commands based on keyboard input."""
 
@@ -327,6 +345,62 @@ class ModelProvider(ModelProviderABC):
         self.arrays["joint_angles"] = angles_array
         return angles_array
 
+    def get_leader_arm_joint_angles(self, joint_names: Sequence[str]) -> np.ndarray:
+        """Get real joint angles from leader arm via UDP (Raspberry Pi)."""
+        
+        # Initialize UDP receiver if not already done
+        if not hasattr(self, '_udp_initialized'):
+            self._udp_initialized = True
+            self._latest_joint_data = None
+            self.start_udp_receiver()
+        
+        try:
+            if self._latest_joint_data is not None:
+                # Joint mapping: left arm first (21-25), then right arm (11-15)
+                joint_order = ['21', '22', '23', '24', '25', '11', '12', '13', '14', '15']
+                joint_values = []
+                
+                for joint_id in joint_order:
+                    if joint_id in self._latest_joint_data:
+                        joint_values.append(math.radians(self._latest_joint_data[joint_id]))
+                    else:
+                        joint_values.append(0.0)
+                
+                return np.array(joint_values, dtype=np.float32)
+            else:
+                return np.zeros(10, dtype=np.float32)
+        except Exception:
+            return np.zeros(10, dtype=np.float32)
+    
+    def start_udp_receiver(self):
+        """Start UDP receiver in background thread."""
+        def run_udp_receiver():
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            
+            try:
+                sock.bind(("0.0.0.0", 8888))
+                
+                while True:
+                    try:
+                        data, addr = sock.recvfrom(512)
+                        message = data.decode('utf-8')
+                        joint_data = json.loads(message)
+                        self._latest_joint_data = joint_data["joints"]
+                        logger.info(f"UDP received data from {addr}: {joint_data['joints']}")
+                    except Exception as e:
+                        logger.debug(f"UDP receive error: {e}")
+                        
+            except Exception as e:
+                logger.error(f"UDP receiver error: {e}")
+            finally:
+                sock.close()
+        
+        if not hasattr(self, '_udp_thread') or not self._udp_thread.is_alive():
+            self._udp_thread = threading.Thread(target=run_udp_receiver, daemon=True)
+            self._udp_thread.start()
+
     def get_joint_angular_velocities(self, joint_names: Sequence[str]) -> np.ndarray:
         velocities = [float(self.simulator._data.joint(joint_name).qvel) for joint_name in joint_names]
         velocities_array = np.array(velocities, dtype=np.float32)
@@ -372,10 +446,31 @@ class ModelProvider(ModelProviderABC):
         return time_array
 
     def get_command(self) -> np.ndarray:
-        command_array = np.array(self.keyboard_state.value, dtype=np.float32)
-        self.arrays["command"] = command_array
-        # logger.info(f"Command: {command_array}")
-        return command_array
+        """Get command array based on input type - keyboard or UDP."""
+        
+        # Check if we're using ten_joint command type (UDP control)
+        if isinstance(self.keyboard_state, TenJointInputState):
+            # Use UDP data for ten_joint command type
+            try:
+                real_angles = self.get_leader_arm_joint_angles([])  # Get real data
+                if real_angles is not None and len(real_angles) > 0:
+                    logger.info(f"Using UDP data: {real_angles}")
+                    # real_angles is already a numpy array, no need to convert again
+                    self.arrays["command"] = real_angles
+                    return real_angles
+            except Exception as e:
+                logger.info(f"Error getting UDP data: {e}")
+            
+            # If no UDP data, return zeros for 10 joints
+            command_array = np.zeros(10, dtype=np.float32)
+            self.arrays["command"] = command_array
+            logger.info(f"No UDP data, using zeros: {command_array}")
+            return command_array
+        else:
+            # Use keyboard state for other command types
+            keyboard_values = np.array(self.keyboard_state.value, dtype=np.float32)
+            self.arrays["command"] = keyboard_values
+            return keyboard_values
 
     def take_action(self, action: np.ndarray, metadata: PyModelMetadata) -> None:
         joint_names = metadata.joint_names  # type: ignore[attr-defined]
