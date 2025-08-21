@@ -369,7 +369,7 @@ class ModelProvider(ModelProviderABC):
                 return np.array(joint_values, dtype=np.float32)
             else:
                 return np.zeros(10, dtype=np.float32)
-        except Exception:
+        except Exception as e:
             return np.zeros(10, dtype=np.float32)
     
     def start_udp_receiver(self):
@@ -388,7 +388,7 @@ class ModelProvider(ModelProviderABC):
                         message = data.decode('utf-8')
                         joint_data = json.loads(message)
                         self._latest_joint_data = joint_data["joints"]
-                        logger.info(f"UDP received data from {addr}: {joint_data['joints']}")
+                        #logger.info(f"UDP received data from {addr}: {joint_data['joints']}")
                     except Exception as e:
                         logger.debug(f"UDP receive error: {e}")
                         
